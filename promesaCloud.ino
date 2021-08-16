@@ -12,8 +12,8 @@
 //nRF24L01
 RF24 radio(18, 10);                    // nRF24L01(+) radio attached using Getting Started board
 RF24Network network(radio);          // Network uses that radio
-const uint16_t this_node = 01;       // Address of our node in Octal format
-const uint16_t other_node = 00;      // Address of the other node in Octal format
+const uint16_t this_node = 00;       // Address of our node in Octal format
+const uint16_t other_node = 01;      // Address of the other node in Octal format
 const unsigned long interval = 2000; // How often (in ms) to send 'hello world' to the other unit
 unsigned long last_sent;             // When did we last send?
 unsigned long packets_sent;          // How many have we sent already
@@ -28,7 +28,7 @@ struct payload_t {                   // Structure of our payload
 #define DATA_PIN 9
 CRGB leds[NUM_LEDS];
 unsigned long timeToShow;
-bool colorToShow;
+unsigned char colorToShow;
 
 void setup(void) {
   Serial.begin(115200);
@@ -70,18 +70,34 @@ void loop() {
       Serial.println("failed.");
   }
 
+  if(network.available()) {
+    RF24NetworkHeader header;
+    payload_t payload;
+    network.read(header, &payload, sizeof(payload));
+    Serial.print("Received packet #");
+    Serial.print(payload.counter);
+    Serial.print(" at ");
+    Serial.println(payload.ms);
+  }
+
   // Turn the LED on, then pause
   if(millis() >= timeToShow + 500)
   {
     Serial.print("Blink: "); 
     Serial.println(colorToShow);
 
-    if(colorToShow) leds[0] = CRGB::Red;
-    else leds[0] = CRGB::Black;
-    
+    switch(colorToShow++)
+    {
+      case 0: leds[0] = CRGB::Red; break;
+      case 1: leds[0] = CRGB::Green; break;
+      case 2: leds[0] = CRGB::Blue; break;
+      default: leds[0] = CRGB::White; break;
+    }
+
+    if(colorToShow >= 3) colorToShow = 0;
+
     FastLED.show();
 
-    colorToShow = !colorToShow;
     timeToShow = millis();
   }
 
