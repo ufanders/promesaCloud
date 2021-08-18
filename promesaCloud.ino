@@ -45,7 +45,7 @@ int handleConsole(void);
 #include <RF24.h>
 #include <RF24Network.h>
 
-RF24 radio(18, 10);                    // nRF24L01(+) radio attached using Getting Started board
+RF24 radio(18, 10);                  // nRF24L01(+) radio attached to Arduino Pro Micro
 RF24Network network(radio);          // Network uses that radio
 const uint16_t this_node = 00;       // Address of our node in Octal format
 const uint16_t other_node = 01;      // Address of the other node in Octal format
@@ -57,6 +57,12 @@ struct payload_t {                   // Structure of our payload
   unsigned long counter;
 };
 
+const uint16_t nodeAddress[11] = { //octal number format.
+  0, //00.
+  1, 2, 3, 4, 5, //01, 02, 03, 04, 05.
+  0b001001, 0b010001, 0b011001, 0b100001, 0b101001 //11, 21, 31, 41, 51.
+};
+
 //FastLED
 #include <FastLED.h>
 #define NUM_LEDS 90 //30leds/m, 3m.
@@ -66,6 +72,11 @@ unsigned long timeToShow;
 unsigned char colorToShow;
 uint8_t gHue = 0; // rotating "base color" used by many of the patterns
 
+void sinelon();
+void rainbow();
+void lightning();
+
+//Application
 void setup(void) {
   Serial.begin(115200);
   if (!Serial) {
@@ -99,8 +110,7 @@ void loop() {
     last_sent = now;
 
     Serial.print("Sending...");
-    cloudMsg msg;
-    msg.msgType = MSG_NOOP;
+    cloudMsg msg = {MSG_NOOP, 0xAB, 0xCD, 0xEF, 0xDE, 0xAD, 0xBE, 0xEF};
     RF24NetworkHeader header(/*to node*/ other_node);
     bool ok = network.write(header, &msg, sizeof(msg));
     if (ok)
@@ -140,13 +150,24 @@ void loop() {
   }
   */
 
-  //FastLED's built-in rainbow generator
-  if(millis() >= timeToShow + 1000/60) //60fps
+
+  if(millis() >= timeToShow + 1000)
   {
-    fill_rainbow(leds, NUM_LEDS, gHue++, 7);
+    lightning();
+
+    timeToShow = millis();
+  }
+
+  /*
+  if(millis() >= timeToShow + 1000/30) //30fps
+  {
+    gHue++;
+    rainbow();
+    //sinelon();
     FastLED.show();
     timeToShow = millis();
   }
+  */
 
 }
 
@@ -280,7 +301,70 @@ void printCloudMsg(cloudMsg* msg)
 
   for(uint8_t i = 0; i < sizeof(msgBytes); i++)
   {
-    Serial.print(msgBytes[i], HEX); //print out bytes in hex
+    uint8_t hn = (msgBytes[i] >> 4) & 0x0F;
+    uint8_t ln = msgBytes[i] & 0x0F;
+    
+    Serial.print(hn, HEX); //print out high nybble in hex.
+    Serial.print(ln, HEX); //print out low nybble in hex.
   }
   Serial.println();
+}
+
+void sinelon()
+{
+  // a colored dot sweeping back and forth, with fading trails
+  fadeToBlackBy( leds, NUM_LEDS, 20);
+  int pos = beatsin16( 13, 0, NUM_LEDS-1 );
+  leds[pos] += CHSV( gHue, 255, 192);
+}
+
+void rainbow() 
+{
+  // FastLED's built-in rainbow generator
+  fill_rainbow( leds, NUM_LEDS, gHue, 7);
+}
+
+
+//Lightning
+#define FLASHES 8
+#define FREQUENCY 2 // delay between strikes
+
+unsigned int dimmer = 1;
+
+void lightning()
+{
+  uint8_t i;
+  uint8_t length = random8(5,90); //physical length of strike.
+  uint8_t indexStart = random8(0,80); //physical position of strike.
+  //TODO: clip to array length.
+  uint8_t indexEnd = indexStart + length-1;
+
+  if(indexEnd >= NUM_LEDS)
+  {
+    indexEnd = NUM_LEDS-1;
+  }
+
+  for (int flashCounter = 0; flashCounter < random8(3,FLASHES); flashCounter++)
+  {
+    if(flashCounter == 0) dimmer = 5;     // the brightness of the leader is scaled down by a factor of 5
+    else dimmer = random8(1,3);           // return strokes are brighter than the leader
+    
+    for(i = indexStart; i<=indexEnd; i++)
+    {
+      leds[i] = CHSV(255, 0, 255/dimmer);
+    }
+    FastLED.show();
+    //FastLED.showColor(CHSV(255, 0, 255/dimmer));
+    delay(random8(4,10));                 // each flash only lasts 4-10 milliseconds
+    //FastLED.showColor(CHSV(255, 0, 0));
+    for(i = indexStart; i<=indexEnd; i++)
+    {
+      leds[i] = CHSV(255, 0, 0);
+    }
+    FastLED.show();
+    
+    if (flashCounter == 0) delay (150);   // longer delay until next flash after the leader
+    delay(50+random8(100));               // shorter delay between strikes  
+  }
+  delay(random8(FREQUENCY)*100);          // delay between strikes
 }
