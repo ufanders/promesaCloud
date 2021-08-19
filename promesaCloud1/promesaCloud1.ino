@@ -68,12 +68,15 @@ CRGB leds[NUM_LEDS];
 unsigned long timeToShow;
 unsigned char colorToShow;
 unsigned long frameDelayMs;
+CRGB staticColor = CRGB(255,0,0);
 
 #define PAT_NONE 0
 #define PAT_FADE 1
 #define PAT_NOISE 2
 #define PAT_LIGHTNING 3
-#define PAT_MAX 4
+#define PAT_STATIC 4
+#define PAT_RAINBOW 5
+#define PAT_MAX 6
 uint8_t patternToExec = PAT_FADE;
 bool patternChanged = true;
 bool autoAdvanceEnabled = true;
@@ -165,45 +168,9 @@ void loop() {
       printCloudMsg(&msg);
     }
   }
-
-  /*
-  // Turn the LED on, then pause
-  if(millis() >= timeToShow + 500)
-  {
-    Serial.print("Blink: "); 
-    Serial.println(colorToShow);
-
-    switch(colorToShow++)
-    {
-      case 0: leds[0] = CRGB::Red; break;
-      case 1: leds[0] = CRGB::Green; break;
-      case 2: leds[0] = CRGB::Blue; break;
-      default: leds[0] = CRGB::White; break;
-    }
-
-    if(colorToShow >= 3) colorToShow = 0;
-
-    FastLED.show();
-
-    timeToShow = millis();
-  }
-  */
-
- /*
-  if(millis() >= timeToShow + 1000)
-  {
-    lightning();
-
-    timeToShow = millis();
-  }
-*/
   
   if(millis() >= timeToShow + frameDelayMs) //30fps
   {
-    //gHue++;
-    //rainbow();
-    //sinelon();
-    //fadeThrough();
     patternExec();
     FastLED.show();
     timeToShow = millis();
@@ -270,29 +237,54 @@ int handleConsole(void)
           return 1;
         }
       }
-      else if(strcmp(ser,"i") == 0) // e.g. "i [network address] [#RRGGBB]"
+      else if(strcmp(ser,"c") == 0) // e.g. "i [network address] [#RRGGBB]"
       {
         //set network node to solid color of your choosing
         pToken = strtok (NULL," "); //get second input portion.
         if(!pToken) return 1;
         uint16_t addrVal = atoi(pToken);
-        if(!network.is_valid_address(addrVal)) return 1;
 
         pToken = strtok (NULL," "); //get third input portion.
         if(!pToken) return 1;
         uint32_t colorVal = strtol(pToken, 0, 16); //atol(pToken);
 
+        CRGB color;
+        color.r = (colorVal >> 16) & 0xFF;
+        color.g = (colorVal >> 8) & 0xFF;
+        color.b = (colorVal & 0xFF);
+
         Serial.print("Set node ");
-        Serial.print(addrVal, OCT);
-        Serial.print(" to #");
+        Serial.print(addrVal);
+        Serial.print(" (");
+        Serial.print(nodeAddress[addrVal], OCT);
+        Serial.print(") to #");
         Serial.print(colorVal, HEX);
         Serial.print(": ");
-        
+
         cloudMsg msg;
         msg.msgType = MSG_SETCOLOR;
-        memcpy(msg.msgPayload, &colorVal, sizeof(colorVal));
-        RF24NetworkHeader header(addrVal);
-        if(network.write(header, &msg, sizeof(msg)))
+        //memcpy(msg.msgPayload, &color, sizeof(CRGB)); //not working.
+        msg.msgPayload[0] = color.r;
+        msg.msgPayload[1] = color.g;
+        msg.msgPayload[2] = color.b;
+        bool ok = false;
+
+        if(addrVal == this_node)
+        {
+          handleMessage(&msg);
+          ok = true;
+        }
+        else
+        {
+          RF24NetworkHeader header(addrVal);
+          if(networkOk && network.is_valid_address(addrVal) 
+            && network.write(header, &msg, sizeof(msg)))
+            {
+              ok = true;
+            }
+        }
+
+        if(ok)
         {
           Serial.print("OK.\n");
           return 0;
@@ -351,10 +343,34 @@ int handleConsole(void)
           return 1;
         }
       }
+      
     }
   } 
   
   return -1;
+}
+
+int handleMessage(cloudMsg* msg)
+{
+  switch(msg->msgType)
+  {
+    case MSG_SETCOLOR:
+    CRGB color;
+    //memcpy(msg->msgPayload, &color, sizeof(CRGB));
+    staticColor.r = msg->msgPayload[0];
+    staticColor.g = msg->msgPayload[1];
+    staticColor.b = msg->msgPayload[2];
+    Serial.print("Color = #");
+    Serial.print(staticColor.r, HEX);
+    Serial.print(staticColor.g, HEX);
+    Serial.print(staticColor.b, HEX);
+    Serial.println();
+    changePattern(PAT_STATIC);
+    break;
+
+    default:
+    break;
+  }
 }
 
 void printCloudMsg(cloudMsg* msg)
@@ -384,16 +400,14 @@ void sinelon()
 void rainbow() 
 {
   // FastLED's built-in rainbow generator
-  fill_rainbow( leds, NUM_LEDS, gHue, 7);
+  fill_rainbow( leds, NUM_LEDS, gHue++, 7);
 }
 
 
 //Lightning
 #define FLASHES 8
 #define FREQUENCY 2 // delay between strikes
-
 unsigned int dimmer = 1;
-
 void lightning()
 {
   uint8_t i;
@@ -467,6 +481,14 @@ void fadeThrough()
         c1 = c2; c2 = CRGB(10, 10, 10); break;
 
         case 7:
+        lightning();
+        lightning();
+        lightning();
+        lightning();
+        lightning();
+        lightning();
+
+        case 8:
         if(autoAdvanceEnabled) changePattern(PAT_NOISE); //advance.
         else { stage = 0; stageChanged = true;}
         break;
@@ -480,12 +502,12 @@ void fadeThrough()
  
   CRGB outColor = blend(c1, c2, amountOfP2);
 
-  amountOfP2 += 5;
+  amountOfP2++;
 
   if(amountOfP2 == 255)
   {
     stage++;
-    if(stage > 6) stage = 0;
+    if(stage > 8) stage = 0;
     stageChanged = true;
     amountOfP2 = 0;
   }
@@ -500,6 +522,8 @@ void patternExec()
     Serial.print("Pattern ");
     Serial.println(patternToExec);
 
+    FastLED.clear();
+
     switch(patternToExec) //init pattern.
     {
       case PAT_FADE:
@@ -512,12 +536,20 @@ void patternExec()
       noiseLoopFrames = 0;
       break;
 
+      case PAT_STATIC:
+      fill_solid(leds, NUM_LEDS, staticColor);
+      break;
+
+      case PAT_RAINBOW:
+      gHue = 0;
+      break;
+
       case PAT_LIGHTNING:
       default:
       break;
     }
 
-    FastLED.clear();
+    
 
     patternChanged = false;
   }
@@ -534,6 +566,10 @@ void patternExec()
 
     case PAT_LIGHTNING:
     lightning();
+    break;
+
+    case PAT_RAINBOW:
+    rainbow();
     break;
 
     default:
