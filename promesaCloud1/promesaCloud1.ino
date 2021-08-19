@@ -52,10 +52,7 @@ const uint16_t other_node = 01;      // Address of the other node in Octal forma
 const unsigned long interval = 2000; // How often (in ms) to send 'hello world' to the other unit
 unsigned long last_sent;             // When did we last send?
 unsigned long packets_sent;          // How many have we sent already
-struct payload_t {                   // Structure of our payload
-  unsigned long ms;
-  unsigned long counter;
-};
+bool networkOk = false;
 
 const uint16_t nodeAddress[11] = { //octal number format.
   0, //00.
@@ -70,11 +67,44 @@ const uint16_t nodeAddress[11] = { //octal number format.
 CRGB leds[NUM_LEDS];
 unsigned long timeToShow;
 unsigned char colorToShow;
+unsigned long frameDelayMs;
+
+#define PAT_NONE 0
+#define PAT_FADE 1
+#define PAT_NOISE 2
+#define PAT_LIGHTNING 3
+#define PAT_MAX 4
+uint8_t patternToExec = PAT_FADE;
+bool patternChanged = true;
+bool autoAdvanceEnabled = true;
+int changePattern(uint8_t);
+
 uint8_t gHue = 0; // rotating "base color" used by many of the patterns
+CRGB sunrise[6] = {
+  CRGB(0,0,0), //off.
+  CRGB(62,51,85), //twilight.
+  CRGB(202,62,1), //sunrise.
+  CRGB(253,127,4), //daybreak.
+  CRGB(121,184,175), //skylight.
+  CRGB(255,242,181) //noon.
+}; //sunrise color palette.
+
+CRGBPalette16 palOff(CRGB(0,0,0));
+CRGBPalette16 palTwilight(CRGB(62,51,85));
+CRGBPalette16 palSunrise(CRGB(202,62,1));
+CRGBPalette16 palDaybreak(CRGB(253,127,4));
+CRGBPalette16 palSkylight(CRGB(121,184,175));
+CRGBPalette16 palNoon(CRGB(255,242,181));
+CRGBPalette16 palOrigin, palTarget;
 
 void sinelon();
 void rainbow();
 void lightning();
+
+void noiseLoop();
+CRGBPalette16 currentPalette(CRGB::Black);
+CRGBPalette16 targetPalette(ForestColors_p);
+unsigned int noiseLoopFrames = 0;
 
 //Application
 void setup(void) {
@@ -85,46 +115,55 @@ void setup(void) {
   Serial.println(F("RF24Network/examples/helloworld_tx/"));
 
   SPI.begin();
-  if (!radio.begin()) {
+  if (!radio.begin())
+  {
     Serial.println(F("Radio hardware not responding!"));
-    while (1) {
-      // hold in infinite loop
-    }
   }
-  network.begin(/*channel*/ 90, /*node address*/ this_node);
+  else
+  {
+    networkOk = true;
+    network.begin(/*channel*/ 90, /*node address*/ this_node);
+  }
 
   FastLED.addLeds<WS2812B, DATA_PIN, GRB>(leds, NUM_LEDS);  // GRB ordering is typical
+  FastLED.setCorrection(TypicalLEDStrip);
+  FastLED.setMaxPowerInVoltsAndMilliamps(5, 5000);
   timeToShow = 0;
+  frameDelayMs = 1000/30; //30 fps.
+
 }
 
 void loop() {
 
   handleConsole();
 
-  network.update(); // Check the network regularly
+  if(networkOk)
+  {
+    network.update(); // Check the network regularly
 
-  unsigned long now = millis();
+    unsigned long now = millis();
 
-  // If it's time to send a message, send it!
-  if (now - last_sent >= interval) {
-    last_sent = now;
+    // If it's time to send a message, send it!
+    if (now - last_sent >= interval) {
+      last_sent = now;
 
-    Serial.print("Sending...");
-    cloudMsg msg = {MSG_NOOP, 0xAB, 0xCD, 0xEF, 0xDE, 0xAD, 0xBE, 0xEF};
-    RF24NetworkHeader header(/*to node*/ other_node);
-    bool ok = network.write(header, &msg, sizeof(msg));
-    if (ok)
-      Serial.println("ok.");
-    else
-      Serial.println("failed.");
-  }
+      Serial.print("Sending...");
+      cloudMsg msg = {MSG_NOOP, 0xAB, 0xCD, 0xEF, 0xDE, 0xAD, 0xBE, 0xEF};
+      RF24NetworkHeader header(/*to node*/ other_node);
+      bool ok = network.write(header, &msg, sizeof(msg));
+      if (ok)
+        Serial.println("ok.");
+      else
+        Serial.println("failed.");
+    }
 
-  if(network.available()) {
-    RF24NetworkHeader header;
-    cloudMsg msg;
-    network.read(header, &msg, sizeof(msg));
-    Serial.print("Received: ");
-    printCloudMsg(&msg);
+    if(network.available()) {
+      RF24NetworkHeader header;
+      cloudMsg msg;
+      network.read(header, &msg, sizeof(msg));
+      Serial.print("Received: ");
+      printCloudMsg(&msg);
+    }
   }
 
   /*
@@ -150,24 +189,25 @@ void loop() {
   }
   */
 
-
+ /*
   if(millis() >= timeToShow + 1000)
   {
     lightning();
 
     timeToShow = millis();
   }
-
-  /*
-  if(millis() >= timeToShow + 1000/30) //30fps
+*/
+  
+  if(millis() >= timeToShow + frameDelayMs) //30fps
   {
-    gHue++;
-    rainbow();
+    //gHue++;
+    //rainbow();
     //sinelon();
+    //fadeThrough();
+    patternExec();
     FastLED.show();
     timeToShow = millis();
   }
-  */
 
 }
 
@@ -288,6 +328,29 @@ int handleConsole(void)
         Serial.print(eeprom.ledPattern);
         Serial.println();
       }
+      else if(strcmp(ser,"p") == 0)
+      {
+        //change pattern
+        pToken = strtok (NULL," "); //get second input portion.
+        if(!pToken) return 1;
+        uint8_t patternToSelect = atoi(pToken);
+
+        Serial.print("Pattern ");
+        Serial.print(" -> ");
+        Serial.print(patternToSelect);
+        Serial.print(": ");
+
+        if(!changePattern(patternToSelect))
+        {
+          Serial.print("OK.\n");
+          return 0;
+        }
+        else
+        {
+          Serial.print("FAIL.\n");
+          return 1;
+        }
+      }
     }
   } 
   
@@ -336,8 +399,7 @@ void lightning()
   uint8_t i;
   uint8_t length = random8(5,90); //physical length of strike.
   uint8_t indexStart = random8(0,80); //physical position of strike.
-  //TODO: clip to array length.
-  uint8_t indexEnd = indexStart + length-1;
+  uint8_t indexEnd = indexStart + length-1; //clip to array length.
 
   if(indexEnd >= NUM_LEDS)
   {
@@ -354,9 +416,9 @@ void lightning()
       leds[i] = CHSV(255, 0, 255/dimmer);
     }
     FastLED.show();
-    //FastLED.showColor(CHSV(255, 0, 255/dimmer));
+
     delay(random8(4,10));                 // each flash only lasts 4-10 milliseconds
-    //FastLED.showColor(CHSV(255, 0, 0));
+
     for(i = indexStart; i<=indexEnd; i++)
     {
       leds[i] = CHSV(255, 0, 0);
@@ -368,3 +430,146 @@ void lightning()
   }
   delay(random8(FREQUENCY)*100);          // delay between strikes
 }
+
+uint8_t amountOfP2 = 0;
+uint8_t stage = 0;
+bool stageChanged = true;
+CRGB c1, c2;
+void fadeThrough()
+{
+  if(stageChanged)
+  {
+
+    Serial.print("Stage ");
+    Serial.println(stage);
+
+     switch(stage)
+      {
+        case 0:
+        c1 = CRGB::Black; c2 = CRGB::Navy; break;
+
+        case 1:
+        c1 = c2; c2 = CRGB::Maroon; break;
+
+        case 2:
+        c1 = c2; c2 = CRGB::DarkOrange; break;
+
+        case 3:
+        c1 = c2; c2 = CRGB::CornflowerBlue; break;
+
+        case 4:
+        c1 = c2; c2 = CRGB::LightSkyBlue; break;
+
+        case 5:
+        c1 = c2; c2 = CRGB::DarkSlateBlue; break;
+
+        case 6:
+        c1 = c2; c2 = CRGB(10, 10, 10); break;
+
+        case 7:
+        if(autoAdvanceEnabled) changePattern(PAT_NOISE); //advance.
+        else { stage = 0; stageChanged = true;}
+        break;
+
+        default:
+        break;
+      }
+
+      stageChanged = false;
+  }
+ 
+  CRGB outColor = blend(c1, c2, amountOfP2);
+
+  amountOfP2 += 5;
+
+  if(amountOfP2 == 255)
+  {
+    stage++;
+    if(stage > 6) stage = 0;
+    stageChanged = true;
+    amountOfP2 = 0;
+  }
+
+  fill_solid(leds, NUM_LEDS, outColor);
+}
+
+void patternExec()
+{
+  if(patternChanged)
+  {
+    Serial.print("Pattern ");
+    Serial.println(patternToExec);
+
+    switch(patternToExec) //init pattern.
+    {
+      case PAT_FADE:
+      stage = 0;
+      stageChanged = true;
+      amountOfP2 = 0;
+      break;
+
+      case PAT_NOISE:
+      noiseLoopFrames = 0;
+      break;
+
+      case PAT_LIGHTNING:
+      default:
+      break;
+    }
+
+    FastLED.clear();
+
+    patternChanged = false;
+  }
+
+  switch(patternToExec) //run pattern loop.
+  {
+    case PAT_FADE:
+    fadeThrough();
+    break;
+
+    case PAT_NOISE:
+    noiseLoop();
+    break;
+
+    case PAT_LIGHTNING:
+    lightning();
+    break;
+
+    default:
+    break;
+  }
+}
+
+int changePattern(uint8_t nextPattern)
+{
+  if(nextPattern >= PAT_MAX) return 1;
+  else
+  {
+    patternToExec = nextPattern;
+    patternChanged = true;
+  }
+
+  return 0;
+}
+
+void noiseLoop() {
+
+  fillnoise8();  
+
+  //EVERY_N_MILLIS(10) {
+    nblendPaletteTowardPalette(currentPalette, targetPalette, 48);          // Blend towards the target palette over 48 iterations.
+  //}
+}
+
+void fillnoise8() {
+
+  #define scale 30                                                          // Don't change this programmatically or everything shakes.
+  
+  for(int i = 0; i < NUM_LEDS; i++) {                                       // Just ONE loop to fill up the LED array as all of the pixels change.
+    uint8_t index = inoise8(i*scale, millis()/10+i*scale);                   // Get a value from the noise function. I'm using both x and y axis.
+    leds[i] = ColorFromPalette(currentPalette, index, 255, LINEARBLEND);    // With that value, look up the 8 bit colour palette value and assign it to the current LED.
+  }
+
+}
+
