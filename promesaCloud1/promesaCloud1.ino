@@ -489,7 +489,7 @@ void fadeThrough()
         lightning();
 
         case 8:
-        if(autoAdvanceEnabled) changePattern(PAT_NOISE); //advance.
+        if(autoAdvanceEnabled) changePattern(PAT_FADE); //advance.
         else { stage = 0; stageChanged = true;}
         break;
 
