@@ -5,6 +5,26 @@
  * Every 2 seconds, send a payload to the receiver node.
  */
 
+//nRF24L01
+#include <SPI.h>
+#include <RF24.h>
+#include <RF24Network.h>
+
+RF24 radio(18, 10);                  // nRF24L01(+) radio attached to Arduino Pro Micro
+RF24Network network(radio);          // Network uses that radio
+uint16_t this_node = 00;       // Address of our node in Octal format
+uint16_t other_node = 01;      // Address of the other node in Octal format
+const unsigned long interval = 2000; // How often (in ms) to send 'hello world' to the other unit
+unsigned long last_sent;             // When did we last send?
+unsigned long packets_sent;          // How many have we sent already
+bool networkOk = false;
+
+const uint16_t nodeAddress[11] = { //octal number format.
+  0, //00.
+  1, 2, 3, 4, 5, //01, 02, 03, 04, 05.
+  0b001001, 0b010001, 0b011001, 0b100001, 0b101001 //11, 21, 31, 41, 51.
+};
+
 //Promesa Cloud
 #include <EEPROM.h>
 
@@ -30,35 +50,25 @@ struct cloudMsg
 };
 */
 
+struct msgHdr
+{
+    uint8_t srcAddr;
+    uint8_t dstAddr;
+};
+
 struct cloudMsg
 {
+  //msgHdr hdr;
   uint8_t msgType;
   uint8_t msgPayload[16];
 };
 
-enum msgType {MSG_NOOP, MSG_SETCOLOR, MSG_SETPATTERN, MSG_MAX};
+//TODO: consider making MSBit in msgType indicative of a response.
+enum msgType {MSG_NOOP, MSG_RESP, MSG_SETCOLOR, MSG_SETPATTERN, MSG_SETADDR, MSG_SETBRIGHT, MSG_PASSTHROUGH, MSG_MAX};
+
 void printCloudMsg(cloudMsg* msg);
 int handleConsole(void);
-
-//nRF24L01
-#include <SPI.h>
-#include <RF24.h>
-#include <RF24Network.h>
-
-RF24 radio(18, 10);                  // nRF24L01(+) radio attached to Arduino Pro Micro
-RF24Network network(radio);          // Network uses that radio
-const uint16_t this_node = 00;       // Address of our node in Octal format
-const uint16_t other_node = 01;      // Address of the other node in Octal format
-const unsigned long interval = 2000; // How often (in ms) to send 'hello world' to the other unit
-unsigned long last_sent;             // When did we last send?
-unsigned long packets_sent;          // How many have we sent already
-bool networkOk = false;
-
-const uint16_t nodeAddress[11] = { //octal number format.
-  0, //00.
-  1, 2, 3, 4, 5, //01, 02, 03, 04, 05.
-  0b001001, 0b010001, 0b011001, 0b100001, 0b101001 //11, 21, 31, 41, 51.
-};
+int handleMessage(RF24NetworkHeader*, cloudMsg*);
 
 //FastLED
 #include <FastLED.h>
@@ -189,9 +199,9 @@ int handleConsole(void)
 
     if(pToken != NULL)
     {
-      if (strcmp(ser,"a") == 0)
+      if (strcmp(ser,"a") == 0) // e.g. "a [node address]"
       {
-        //change network address
+        //change local network address
         pToken = strtok (NULL," "); //get second input portion.
         if(!pToken) return 1;
         int addrVal = atoi(pToken);
@@ -203,6 +213,7 @@ int handleConsole(void)
         if(network.is_valid_address(addrVal))
         {
           eeprom.netNodeAddress = addrVal;
+          this_node = eeprom.netNodeAddress;
           Serial.print("OK.\n");
           return 0;
         }
@@ -212,10 +223,14 @@ int handleConsole(void)
           return 1;
         }
       }
-      else if(strcmp(ser,"b") == 0)
+      else if(strcmp(ser,"b") == 0) // e.g. "b [network address] [0 to 255]"
       {
         //change brightness
         pToken = strtok (NULL," "); //get second input portion.
+        if(!pToken) return 1;
+        uint16_t addrVal = atoi(pToken);
+
+        pToken = strtok (NULL," "); //get third input portion.
         if(!pToken) return 1;
         uint8_t brightnessVal = atoi(pToken);
 
@@ -223,10 +238,27 @@ int handleConsole(void)
         Serial.print(brightnessVal);
         Serial.print(": ");
 
-        eeprom.ledBrightness = brightnessVal;
-        FastLED.setBrightness(brightnessVal);
+        RF24NetworkHeader header(addrVal);
+        cloudMsg msg;
+        msg.msgType = MSG_SETBRIGHT;
+        msg.msgPayload[0] = brightnessVal;
+        bool ok = false;
 
-        if(1) //QUES: can we get a kickback from the power limiter function?
+        if(addrVal == this_node)
+        {
+          handleMessage(&header, &msg);
+          ok = true;
+        }
+        else
+        {
+          if(networkOk && network.is_valid_address(addrVal) 
+            && network.write(header, &msg, sizeof(msg)))
+            {
+              ok = true;
+            }
+        }
+
+        if(ok)
         {
           Serial.print("OK.\n");
           return 0;
@@ -236,8 +268,9 @@ int handleConsole(void)
           Serial.print("FAIL.\n");
           return 1;
         }
+
       }
-      else if(strcmp(ser,"c") == 0) // e.g. "i [network address] [#RRGGBB]"
+      else if(strcmp(ser,"c") == 0) // e.g. "c [network address] [RRGGBB]"
       {
         //set network node to solid color of your choosing
         pToken = strtok (NULL," "); //get second input portion.
@@ -261,6 +294,7 @@ int handleConsole(void)
         Serial.print(colorVal, HEX);
         Serial.print(": ");
 
+        RF24NetworkHeader header(addrVal);
         cloudMsg msg;
         msg.msgType = MSG_SETCOLOR;
         //memcpy(msg.msgPayload, &color, sizeof(CRGB)); //not working.
@@ -271,12 +305,11 @@ int handleConsole(void)
 
         if(addrVal == this_node)
         {
-          handleMessage(&msg);
+          handleMessage(&header, &msg);
           ok = true;
         }
         else
         {
-          RF24NetworkHeader header(addrVal);
           if(networkOk && network.is_valid_address(addrVal) 
             && network.write(header, &msg, sizeof(msg)))
             {
@@ -295,9 +328,9 @@ int handleConsole(void)
           return 1;
         }
       }
-      else if(strcmp(ser,"d") == 0)
+      else if(strcmp(ser,"d") == 0) // e.g. "d"
       {
-        //dump storage
+        //dump local storage
         Serial.print("netMaster = ");
         Serial.print(eeprom.netMaster);
         Serial.println();
@@ -320,10 +353,14 @@ int handleConsole(void)
         Serial.print(eeprom.ledPattern);
         Serial.println();
       }
-      else if(strcmp(ser,"p") == 0)
+      else if(strcmp(ser,"p") == 0) // e.g. "p [network address] [0 to (PAT_MAX-1)]"
       {
         //change pattern
         pToken = strtok (NULL," "); //get second input portion.
+        if(!pToken) return 1;
+        uint16_t addrVal = atoi(pToken);
+
+        pToken = strtok (NULL," "); //get third input portion.
         if(!pToken) return 1;
         uint8_t patternToSelect = atoi(pToken);
 
@@ -332,7 +369,28 @@ int handleConsole(void)
         Serial.print(patternToSelect);
         Serial.print(": ");
 
-        if(!changePattern(patternToSelect))
+        RF24NetworkHeader header(addrVal);
+        cloudMsg msg;
+        msg.msgType = MSG_SETPATTERN;
+        //memcpy(msg.msgPayload, &color, sizeof(CRGB)); //not working.
+        msg.msgPayload[0] = patternToSelect;
+        bool ok = false;
+
+        if(addrVal == this_node)
+        {
+          handleMessage(&header, &msg);
+          ok = true;
+        }
+        else
+        {
+          if(networkOk && network.is_valid_address(addrVal) 
+            && network.write(header, &msg, sizeof(msg)))
+            {
+              ok = true;
+            }
+        }
+
+        if(ok)
         {
           Serial.print("OK.\n");
           return 0;
@@ -350,8 +408,13 @@ int handleConsole(void)
   return -1;
 }
 
-int handleMessage(cloudMsg* msg)
+int handleMessage(RF24NetworkHeader* hdr, cloudMsg* msg)
 {
+  int ret = 1; //success or failure.
+  bool localMsg = false; //did the message originate from the console or a network node?
+
+  if(hdr->from_node == this_node) localMsg = true; //print response to local console, not source network node.
+
   switch(msg->msgType)
   {
     case MSG_SETCOLOR:
@@ -365,12 +428,53 @@ int handleMessage(cloudMsg* msg)
     Serial.print(staticColor.g, HEX);
     Serial.print(staticColor.b, HEX);
     Serial.println();
-    changePattern(PAT_STATIC);
+    ret = changePattern(PAT_STATIC);
+    break;
+
+    case MSG_NOOP:
+    ret = 0;
+    break;
+
+    case MSG_SETPATTERN:
+    ret = changePattern(msg->msgPayload[0]);
+    break;
+
+    case MSG_SETBRIGHT:
+    eeprom.ledBrightness = msg->msgPayload[0];
+    FastLED.setBrightness(eeprom.ledBrightness);
+    ret = 0;
+    break;
+
+    case MSG_SETADDR:
+    break;
+
+    case MSG_PASSTHROUGH: //arbitrary text
     break;
 
     default:
     break;
   }
+
+  if(localMsg)
+  {
+    Serial.print("ret: ");
+    Serial.println(ret);
+  }
+  else
+  {
+    cloudMsg msgOut;
+    msgOut.msgType = MSG_RESP;
+    msgOut.msgPayload[0] = msg->msgType;
+    memcpy(&msgOut.msgPayload[1], &ret, sizeof(ret));
+    RF24NetworkHeader header(hdr->from_node);
+    bool ok = network.write(header, &msg, sizeof(msg));
+    Serial.print("-> ret: ");
+    Serial.print(ret);
+    if(ok) Serial.println(" [OK]");
+    else Serial.println(" [FAIL]");
+  }
+
+  return ret;
 }
 
 void printCloudMsg(cloudMsg* msg)
@@ -402,7 +506,6 @@ void rainbow()
   // FastLED's built-in rainbow generator
   fill_rainbow( leds, NUM_LEDS, gHue++, 7);
 }
-
 
 //Lightning
 #define FLASHES 8
@@ -481,6 +584,12 @@ void fadeThrough()
         c1 = c2; c2 = CRGB(10, 10, 10); break;
 
         case 7:
+        lightning();
+        lightning();
+        lightning();
+        lightning();
+        lightning();
+        lightning();
         lightning();
         lightning();
         lightning();
