@@ -515,6 +515,7 @@ int handleMessage(RF24NetworkHeader* hdr, cloudMsg* msg)
     if(!suppressResponse)
     {
       cloudMsg msgOut;
+      memset(&msgOut, 0, sizeof(msgOut));
       msgOut.msgType = MSG_RESP;
       msgOut.msgPayload[0] = msg->msgType;
       memcpy(&msgOut.msgPayload[1], &ret, sizeof(ret));
