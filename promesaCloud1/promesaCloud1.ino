@@ -14,12 +14,13 @@
 
 RF24 radio(18, 10);                  // nRF24L01(+) radio attached to Arduino Pro Micro
 RF24Network network(radio);          // Network uses that radio
-uint16_t this_node = 00;       // Address of our node in Octal format
+//uint16_t this_node = 00;       // Address of our node in Octal format
 uint16_t other_node = 01;      // Address of the other node in Octal format
 const unsigned long interval = 2000; // How often (in ms) to send 'hello world' to the other unit
 unsigned long last_sent;             // When did we last send?
 unsigned long packets_sent;          // How many have we sent already
 bool networkOk = false;
+uint16_t nodesPresent[NODEADDRESSINDEX_MAX];
 
 const uint16_t nodeAddress[NODEADDRESSINDEX_MAX] = { //octal number format.
   0, //00.
@@ -110,6 +111,20 @@ CRGBPalette16 currentPalette(CRGB::Black);
 CRGBPalette16 targetPalette(ForestColors_p);
 unsigned int noiseLoopFrames = 0;
 
+//Buttons
+#include <ButtonDebounce.h>
+
+/*
+ButtonDebounce buttonPwr(10, 100);
+ButtonDebounce buttonPat(11, 100);
+ButtonDebounce buttonBrt(12, 100);
+bool buttonPwrIsPressed = false;
+bool buttonPatIsPressed = false;
+bool buttonBrtIsPressed = false;
+*/
+
+void handleButtons(void);
+
 //Application
 void setup(void) {
 
@@ -160,41 +175,33 @@ void setup(void) {
   }
   else
   {
+    radio.setRadiation(RF24_PA_HIGH, RF24_1MBPS); //+3dB
     networkOk = true;
-    network.begin(/*channel*/ 90, /*node address*/ this_node);
+    network.begin(eeprom.netChannel, eeprom.netNodeAddress);
   }
+
+  memset(nodesPresent, 0, sizeof(nodesPresent));
 
   FastLED.addLeds<WS2812B, DATA_PIN, GRB>(leds, NUM_LEDS);  // GRB ordering is typical
   FastLED.setCorrection(TypicalLEDStrip);
   FastLED.setMaxPowerInVoltsAndMilliamps(5, 5000);
+  FastLED.setBrightness(eeprom.ledBrightness);
   timeToShow = 0;
-  frameDelayMs = 1000/30; //30 fps.
-
+  frameDelayMs = 1000/eeprom.ledFps;
+  patternToExec = eeprom.ledPattern;
 }
 
 void loop() {
 
   handleConsole();
 
+  handleButtons();
+
   if(networkOk)
   {
     network.update(); // Check the network regularly
 
     unsigned long now = millis();
-
-    // If it's time to send a message, send it!
-    if (now - last_sent >= interval) {
-      last_sent = now;
-
-      Serial.print("Sending...");
-      cloudMsg msg = {MSG_NOOP, 0xAB, 0xCD, 0xEF, 0xDE, 0xAD, 0xBE, 0xEF};
-      RF24NetworkHeader header(/*to node*/ other_node);
-      bool ok = network.write(header, &msg, sizeof(msg));
-      if (ok)
-        Serial.println("ok.");
-      else
-        Serial.println("failed.");
-    }
 
     if(network.available()) {
       RF24NetworkHeader header;
@@ -229,7 +236,7 @@ int handleConsole(void)
 
     if(pToken != NULL)
     {
-      if (strcmp(ser,"a") == 0) // e.g. "a [node address index]"
+      if (strcmp(pToken,"a") == 0) // e.g. "a [node address index]"
       {
         //change local network address
         pToken = strtok (NULL," "); //get second input portion.
@@ -253,8 +260,7 @@ int handleConsole(void)
         if(network.is_valid_address(nodeAddress[addrVal]))
         {
           eeprom.netNodeAddress = nodeAddress[addrVal];
-          this_node = eeprom.netNodeAddress;
-          network.begin(this_node);
+          network.begin(eeprom.netNodeAddress);
           Serial.print("OK.\n");
           return 0;
         }
@@ -264,7 +270,7 @@ int handleConsole(void)
           return 1;
         }
       }
-      else if(strcmp(ser,"b") == 0) // e.g. "b [network address] [0 to 255]"
+      else if(strcmp(pToken,"b") == 0) // e.g. "b [network address] [0 to 255]"
       {
         //change brightness
         pToken = strtok (NULL," "); //get second input portion.
@@ -280,13 +286,13 @@ int handleConsole(void)
         Serial.print(": ");
 
         RF24NetworkHeader header(nodeAddress[addrVal]);
-        header.from_node = this_node;
+        header.from_node = eeprom.netNodeAddress;
         cloudMsg msg;
         msg.msgType = MSG_SETBRIGHT;
         msg.msgPayload[0] = brightnessVal;
         bool ok = false;
 
-        if(nodeAddress[addrVal] == this_node)
+        if(nodeAddress[addrVal] == eeprom.netNodeAddress)
         {
           handleMessage(&header, &msg);
           ok = true;
@@ -312,7 +318,7 @@ int handleConsole(void)
         }
 
       }
-      else if(strcmp(ser,"c") == 0) // e.g. "c [network address] [RRGGBB]"
+      else if(strcmp(pToken,"c") == 0) // e.g. "c [network address] [RRGGBB]"
       {
         //set network node to solid color of your choosing
         pToken = strtok (NULL," "); //get second input portion.
@@ -337,7 +343,7 @@ int handleConsole(void)
         Serial.print(": ");
 
         RF24NetworkHeader header(nodeAddress[addrVal]);
-        header.from_node = this_node;
+        header.from_node = eeprom.netNodeAddress;
         cloudMsg msg;
         msg.msgType = MSG_SETCOLOR;
         //memcpy(msg.msgPayload, &color, sizeof(CRGB)); //not working.
@@ -346,7 +352,7 @@ int handleConsole(void)
         msg.msgPayload[2] = color.b;
         bool ok = false;
 
-        if(nodeAddress[addrVal] == this_node)
+        if(nodeAddress[addrVal] == eeprom.netNodeAddress)
         {
           handleMessage(&header, &msg);
           ok = true;
@@ -371,7 +377,7 @@ int handleConsole(void)
           return 1;
         }
       }
-      else if(strcmp(ser,"d") == 0) // e.g. "d"
+      else if(strcmp(pToken,"d") == 0) // e.g. "d"
       {
         //dump local storage
         Serial.print("netMaster = ");
@@ -395,8 +401,10 @@ int handleConsole(void)
         Serial.print("ledPattern = ");
         Serial.print(eeprom.ledPattern);
         Serial.println();
+
+        return 0;
       }
-      else if(strcmp(ser,"p") == 0) // e.g. "p [network address] [0 to (PAT_MAX-1)]"
+      else if(strcmp(pToken,"p") == 0) // e.g. "p [network address] [0 to (PAT_MAX-1)]"
       {
         //change pattern
         pToken = strtok (NULL," "); //get second input portion.
@@ -413,14 +421,13 @@ int handleConsole(void)
         Serial.print(": ");
 
         RF24NetworkHeader header(nodeAddress[addrVal]);
-        header.from_node = this_node;
+        header.from_node = eeprom.netNodeAddress;
         cloudMsg msg;
         msg.msgType = MSG_SETPATTERN;
-        //memcpy(msg.msgPayload, &color, sizeof(CRGB)); //not working.
         msg.msgPayload[0] = patternToSelect;
         bool ok = false;
 
-        if(nodeAddress[addrVal] == this_node)
+        if(nodeAddress[addrVal] == eeprom.netNodeAddress)
         {
           handleMessage(&header, &msg);
           ok = true;
@@ -445,6 +452,44 @@ int handleConsole(void)
           return 1;
         }
       }
+      else if(strcmp(pToken,"s") == 0)
+      {
+        //save settings to EEPROM.
+        uint8_t* eepromPtr = (uint8_t*)&eeprom;
+        for(uint8_t i = 0; i < sizeof(eeprom); i++)
+        {
+          EEPROM.write(i, eepromPtr[i]); //save to EEPROM.
+        }
+
+        Serial.println("Settings saved.");
+        return 0;
+      }
+      else if(strcmp(pToken,"r") == 0)
+      {
+        RF24NetworkHeader header;
+        header.from_node = eeprom.netNodeAddress;
+        cloudMsg msg;
+        msg.msgType = MSG_NOOP;
+        bool ok = false;
+
+        //scan network for nodes.
+        for(uint8_t i = 0; i < NODEADDRESSINDEX_MAX; i++)
+        {
+          if(nodeAddress[i] != eeprom.netNodeAddress)
+          {
+            header.to_node = nodeAddress[i];
+            
+            if(networkOk && network.is_valid_address(nodeAddress[i]) 
+              && network.write(header, &msg, sizeof(msg)))
+              {
+                ok = true;
+              }
+          }
+        }
+
+        Serial.println("Pings sent.");
+        return 0;
+      }
       
     }
   } 
@@ -458,7 +503,7 @@ int handleMessage(RF24NetworkHeader* hdr, cloudMsg* msg)
   bool localMsg = false; //did the message originate from the console or a network node?
   bool suppressResponse = false; //need to guard against response loops.
 
-  if(hdr->from_node == this_node) localMsg = true; //print response to local console, not source network node.
+  if(hdr->from_node == eeprom.netNodeAddress) localMsg = true; //print response to local console, not source network node.
 
   switch(msg->msgType)
   {
@@ -482,6 +527,7 @@ int handleMessage(RF24NetworkHeader* hdr, cloudMsg* msg)
 
     case MSG_SETPATTERN:
     ret = changePattern(msg->msgPayload[0]);
+    if(!ret) eeprom.ledPattern = msg->msgPayload[0];
     break;
 
     case MSG_SETBRIGHT:
@@ -499,6 +545,33 @@ int handleMessage(RF24NetworkHeader* hdr, cloudMsg* msg)
     case MSG_RESP:
     ret = 0;
     suppressResponse = true;
+    bool nodeFound = false;
+
+    //scan for presence of responding node in nodesPresent[] list.
+    for(uint8_t i = 0; i < NODEADDRESSINDEX_MAX; i++)
+    {
+      if(nodesPresent[i] == hdr->from_node)
+      {
+        nodeFound = true;
+        i = NODEADDRESSINDEX_MAX;
+        //break;
+      }
+    }
+
+    //if responding node not currently in list, add to list.
+    if(!nodeFound)
+    {
+      for(uint8_t i = 0; i < NODEADDRESSINDEX_MAX; i++)
+      {
+        if(nodesPresent[i] == 0)
+        {
+          nodesPresent[i] = hdr->from_node;
+          i = NODEADDRESSINDEX_MAX;
+          //break;
+        }
+      }
+    }
+
     break;
 
     default:
@@ -711,9 +784,7 @@ void patternExec()
       default:
       break;
     }
-
     
-
     patternChanged = false;
   }
 
@@ -772,3 +843,31 @@ void fillnoise8() {
 
 }
 
+void handleButtons(void)
+{
+  /*
+  buttonPwr.update();
+  if(buttonPwr.state() == LOW && !buttonPwrIsPressed)
+  {
+    //TODO: something
+
+    buttonPwrIsPressed = true;
+  }
+
+  buttonPat.update();
+  if(buttonPat.state() == LOW && !buttonPatIsPressed)
+  {
+    //TODO: something
+
+    buttonPatIsPressed = true;
+  }
+
+  buttonBrt.update();
+  if(buttonBrt.state() == LOW && !buttonBrtIsPressed)
+  {
+    //TODO: something
+
+    buttonBrtIsPressed = true;
+  }
+  */
+}
