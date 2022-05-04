@@ -1,18 +1,51 @@
-/**
- * Simplest possible example of using RF24Network
- *
- * TRANSMITTER NODE
- * Every 2 seconds, send a payload to the receiver node.
- */
+//M5Stack
+#include <SPI.h>
+#define PLAT_M5STACK
+
+#ifdef PLAT_M5STACK
+//#include <M5Stack.h>
+
+#endif
+
+// Define ALTERNATE_PINS to use non-standard GPIO pins for SPI bus
+
+#ifdef ALTERNATE_PINS
+  #define VSPI_MISO   2
+  #define VSPI_MOSI   4
+  #define VSPI_SCLK   0
+  #define VSPI_SS     33
+
+  #define HSPI_MISO   26
+  #define HSPI_MOSI   27
+  #define HSPI_SCLK   25
+  #define HSPI_SS     32
+#else
+  #define VSPI_MISO   MISO
+  #define VSPI_MOSI   MOSI
+  #define VSPI_SCLK   SCK
+  #define VSPI_SS     SS
+
+  #define HSPI_MISO   12
+  #define HSPI_MOSI   13
+  #define HSPI_SCLK   14
+  #define HSPI_SS     15
+#endif
+
+static const int spiClk = 1000000; // 1 MHz
 
 //nRF24L01
-#include <SPI.h>
 #include <RF24.h>
 #include <RF24Network.h>
 
 #define NODEADDRESSINDEX_MAX 11
 
-RF24 radio(18, 10);                  // nRF24L01(+) radio attached to Arduino Pro Micro
+#ifdef PLAT_M5STACK
+RF24 radio(21, SS, spiClk); //CEpin, CSpin
+void IRAM_ATTR isrRF24(void);
+#else
+RF24 radio(18, 10); // nRF24L01(+) radio attached to Arduino Pro Micro
+void isrRF24(void)
+#endif
 RF24Network network(radio);          // Network uses that radio
 //uint16_t this_node = 00;       // Address of our node in Octal format
 uint16_t other_node = 01;      // Address of the other node in Octal format
@@ -28,8 +61,16 @@ const uint16_t nodeAddress[NODEADDRESSINDEX_MAX] = { //octal number format.
   0b001001, 0b010001, 0b011001, 0b100001, 0b101001 //11, 21, 31, 41, 51.
 };
 
+bool radioInt = false;
+bool tx_ok = false;
+bool tx_fail = false;
+bool rx_ready = false;
+
 //Promesa Cloud
+#ifdef PLAT_M5STACK
+#else
 #include <EEPROM.h>
+#endif
 
 #define CLOUDSTORAGE_MAGIC 0xA1B2C3D4
 
@@ -43,18 +84,14 @@ struct cloudStorage
   uint8_t ledBrightness;
   uint8_t ledFps;
   uint8_t ledPattern;
+  CRGB ledColor;
 };
 
+#ifdef PLAT_M5STACK
+IRAM_ATTR cloudStorage eeprom;
+#else
 cloudStorage eeprom;
-
-/*
-struct cloudMsg
-{
-  uint16_t msgLen;
-  uint16_t msgType;
-  void* msgPayload;
-};
-*/
+#endif
 
 struct cloudMsg
 {
@@ -64,14 +101,26 @@ struct cloudMsg
 
 //TODO: consider making MSBit in msgType indicative of a response.
 enum msgType {MSG_NOOP, MSG_RESP, MSG_SETCOLOR, MSG_SETPATTERN, MSG_SETADDR, MSG_SETBRIGHT, MSG_PASSTHROUGH, MSG_MAX};
+char ser[256+1];
+unsigned short charIndex;
+bool resetCharReception = true;
+
 void printCloudMsg(cloudMsg* msg);
 int handleConsole(void);
 int handleMessage(RF24NetworkHeader*, cloudMsg*);
+bool cmdSetBrightness(unsigned char addrDst, unsigned char brightnessVal);
+bool cmdSetColor(unsigned char addrDst, uint32_t colorVal);
 
 //FastLED
 #include <FastLED.h>
+
+#ifdef PLAT_M5STACK
+#define DATA_PIN 2
+#else
+#endif
+
 #define NUM_LEDS 90 //30leds/m, 3m.
-#define DATA_PIN 9
+
 CRGB leds[NUM_LEDS];
 unsigned long timeToShow;
 unsigned char colorToShow;
@@ -115,16 +164,24 @@ unsigned int noiseLoopFrames = 0;
 //Buttons
 #include <ButtonDebounce.h>
 
-/*
-ButtonDebounce buttonPwr(10, 100);
-ButtonDebounce buttonPat(11, 100);
-ButtonDebounce buttonBrt(12, 100);
+ButtonDebounce buttonPwr(37, 100);
+ButtonDebounce buttonPat(38, 100);
+ButtonDebounce buttonBrt(39, 100);
 bool buttonPwrIsPressed = false;
 bool buttonPatIsPressed = false;
 bool buttonBrtIsPressed = false;
-*/
+enum patSteps {PATSTEP_OFF, PATSTEP_RED, PATSTEP_GRN, PATSTEP_BLU, \
+                PATSTEP_PUR, PATSTEP_YEL, PATSTEP_CYN };
+unsigned char patStep;
+bool pwrToggle;
+uint32_t gColor;
 
 void handleButtons(void);
+
+//Power
+#define uS_TO_S_FACTOR 1000000ULL  /* Conversion factor for micro seconds to seconds */
+#define TIME_TO_SLEEP_DEEP 5*uS_TO_S_FACTOR //5 seconds.
+#define DEEPSLEEP_GPIO_PINMASK (GPIO_NUM_39 | GPIO_NUM_38 | GPIO_NUM_37 | GPIO_NUM_22) 
 
 //Application
 void setup(void) {
@@ -136,6 +193,34 @@ void setup(void) {
   }
   Serial.println(F("RF24Network/examples/helloworld_tx/"));
 
+#ifdef PLAT_M5STACK
+  /*
+  M5.begin();  //Init M5Core.  初始化 M5Core
+  M5.Power.begin(); //Init Power module.  初始化电源模块
+  M5.Lcd.setTextColor(YELLOW);  //Set the font color to yellow.  设置字体颜色为黄色
+  M5.Lcd.setTextSize(2);  //Set the font size.  设置字体大小为2
+  M5.Lcd.setCursor(65, 10); //Move the cursor position to (65, 10).  移动光标位置到 (65, 10) 处
+  M5.Lcd.println("Button example"); //The screen prints the formatted string and wraps the line.  输出格式化字符串并换行
+  M5.Lcd.setCursor(3, 35);
+  M5.Lcd.println("Press button B for 700ms");
+  M5.Lcd.println("to clear screen.");
+  M5.Lcd.setTextColor(RED);
+  */
+
+  //disable M5Stack speaker clicking noise.
+  dacWrite(25,0);
+
+  //TODO: load NV memory values from SPIFFS.
+  //populate defaults.
+  eeprom.magic = CLOUDSTORAGE_MAGIC;
+  eeprom.netMaster = false;
+  eeprom.netNodeAddress = 0x00;
+  eeprom.netChannel = 90;
+  eeprom.netNodeMax = NODEADDRESSINDEX_MAX;
+  eeprom.ledBrightness = 128;
+  eeprom.ledFps = 30;
+  eeprom.ledPattern = PAT_NONE;
+#else
   //load NV memory values from EEPROM.
   uint8_t* eepromPtr = (uint8_t*)&eeprom;
   for(uint8_t i = 0; i < sizeof(eeprom); i++)
@@ -168,6 +253,12 @@ void setup(void) {
     Serial.print(eeprom.magic, HEX);
     Serial.println();
   }
+#endif
+
+#ifdef PLAT_M5STACK
+  SPI.setDataMode(SPI_MODE2);
+#else
+#endif
 
   SPI.begin();
   if (!radio.begin())
@@ -176,9 +267,17 @@ void setup(void) {
   }
   else
   {
-    radio.setRadiation(RF24_PA_HIGH, RF24_1MBPS); //+3dB
+    radio.setRadiation(RF24_PA_MAX, RF24_1MBPS); //+3dB
     networkOk = true;
     network.begin(eeprom.netChannel, eeprom.netNodeAddress);
+    
+#ifdef PLAT_M5STACK
+    radio.maskIRQ(false, false, false);
+    pinMode(22, INPUT);
+    attachInterrupt(digitalPinToInterrupt(22), isrRF24, FALLING);
+    radioInt = false;
+#else
+#endif
   }
 
   memset(nodesPresent, 0, sizeof(nodesPresent));
@@ -190,6 +289,9 @@ void setup(void) {
   timeToShow = 0;
   frameDelayMs = 1000/eeprom.ledFps;
   patternToExec = eeprom.ledPattern;
+
+  patStep = PATSTEP_OFF;
+  pwrToggle = false;
 }
 
 void loop() {
@@ -198,25 +300,30 @@ void loop() {
 
   handleButtons();
 
-  if(networkOk)
+  if(radioInt)
   {
-    network.update(); // Check the network regularly
+    radio.whatHappened(tx_ok, tx_fail, rx_ready); //get IRQ status flags
 
-    unsigned long now = millis();
+    if(networkOk)
+    {
+      network.update(); // Check the network regularly
 
-    if(network.available()) {
-      RF24NetworkHeader header;
-      cloudMsg msg;
-      memset(&msg, 0, sizeof(msg));
-      network.read(header, &msg, sizeof(msg));
-      Serial.print("<- (Node ");
-      Serial.print(header.from_node);
-      Serial.print("):");
-      printCloudMsg(&msg);
-      handleMessage(&header, &msg);
+      if(network.available()) {
+        RF24NetworkHeader header;
+        cloudMsg msg;
+        memset(&msg, 0, sizeof(msg));
+        network.read(header, &msg, sizeof(msg));
+        Serial.print("<- (Node ");
+        Serial.print(header.from_node);
+        Serial.print("):");
+        printCloudMsg(&msg);
+        handleMessage(&header, &msg);
+      }
     }
+
+    radioInt = false;
   }
-  
+
   if(millis() >= timeToShow + frameDelayMs) //30fps
   {
     patternExec();
@@ -227,16 +334,55 @@ void loop() {
     }
     timeToShow = millis();
   }
-
 }
 
 int handleConsole(void)
 {
-  if(Serial.available())
+  static unsigned short charAvailable;
+  static bool cmdReceived;
+  
+  if(resetCharReception)
   {
-    char ser[256+1];
     memset(ser, 0, sizeof(ser));
-    Serial.readBytesUntil('\n', ser, sizeof(ser));
+    charIndex = 0;
+    cmdReceived = false;
+
+    //Serial.println("Console reset.");
+    resetCharReception = false;
+  }
+
+  charAvailable = Serial.available();
+  
+  if(charAvailable >= 1)
+  {
+    charIndex += Serial.readBytes(&ser[charIndex], charAvailable);
+
+    if(ser[charIndex-1] == '\r') //|| ser[charIndex] == '\n' || ser[charIndex] == '\f')
+    {
+      ser[--charIndex] = 0; //string terminator.
+      cmdReceived = true;
+
+      /*
+      Serial.print("Received: ");
+      Serial.write(ser, charIndex);
+      */
+      
+      Serial.println(); //echo.
+      
+      resetCharReception = true;
+    }
+    else if(ser[charIndex-1] == '\n')
+    {
+      ser[--charIndex] = 0; //ignore LF
+    }
+    else
+    {
+      Serial.print(ser[charIndex-1]);
+    }
+  }
+
+  if(cmdReceived == true)
+  {
     char* pToken = strtok (ser," "); //get first input portion.
 
     if(pToken != NULL)
@@ -286,30 +432,7 @@ int handleConsole(void)
         if(!pToken) return 1;
         uint8_t brightnessVal = atoi(pToken);
 
-        Serial.print("Brightness -> ");
-        Serial.print(brightnessVal);
-        Serial.print(": ");
-
-        RF24NetworkHeader header(nodeAddress[addrVal]);
-        header.from_node = eeprom.netNodeAddress;
-        cloudMsg msg;
-        msg.msgType = MSG_SETBRIGHT;
-        msg.msgPayload[0] = brightnessVal;
-        bool ok = false;
-
-        if(nodeAddress[addrVal] == eeprom.netNodeAddress)
-        {
-          handleMessage(&header, &msg);
-          ok = true;
-        }
-        else
-        {
-          if(networkOk && network.is_valid_address(nodeAddress[addrVal]) 
-            && network.write(header, &msg, sizeof(msg)))
-            {
-              ok = true;
-            }
-        }
+        bool ok = cmdSetBrightness(addrVal,brightnessVal);
 
         if(ok)
         {
@@ -334,42 +457,7 @@ int handleConsole(void)
         if(!pToken) return 1;
         uint32_t colorVal = strtol(pToken, 0, 16); //atol(pToken);
 
-        CRGB color;
-        color.r = (colorVal >> 16) & 0xFF;
-        color.g = (colorVal >> 8) & 0xFF;
-        color.b = (colorVal & 0xFF);
-
-        Serial.print("Set node ");
-        Serial.print(addrVal);
-        Serial.print(" (");
-        Serial.print(nodeAddress[addrVal], OCT);
-        Serial.print(") to #");
-        Serial.print(colorVal, HEX);
-        Serial.print(": ");
-
-        RF24NetworkHeader header(nodeAddress[addrVal]);
-        header.from_node = eeprom.netNodeAddress;
-        cloudMsg msg;
-        msg.msgType = MSG_SETCOLOR;
-        //memcpy(msg.msgPayload, &color, sizeof(CRGB)); //not working.
-        msg.msgPayload[0] = color.r;
-        msg.msgPayload[1] = color.g;
-        msg.msgPayload[2] = color.b;
-        bool ok = false;
-
-        if(nodeAddress[addrVal] == eeprom.netNodeAddress)
-        {
-          handleMessage(&header, &msg);
-          ok = true;
-        }
-        else
-        {
-          if(networkOk && network.is_valid_address(nodeAddress[addrVal]) 
-            && network.write(header, &msg, sizeof(msg)))
-            {
-              ok = true;
-            }
-        }
+        bool ok = cmdSetColor(addrVal, colorVal);
 
         if(ok)
         {
@@ -459,6 +547,9 @@ int handleConsole(void)
       }
       else if(strcmp(pToken,"s") == 0)
       {
+#ifdef PLAT_M5STACK
+//TODO: save settings to SPIFFS.
+#else
         //save settings to EEPROM.
         uint8_t* eepromPtr = (uint8_t*)&eeprom;
         for(uint8_t i = 0; i < sizeof(eeprom); i++)
@@ -468,6 +559,7 @@ int handleConsole(void)
 
         Serial.println("Settings saved.");
         return 0;
+#endif
       }
       else if(strcmp(pToken,"r") == 0)
       {
@@ -497,9 +589,19 @@ int handleConsole(void)
       }
       
     }
-  } 
+  }
   
   return -1;
+}
+
+#ifdef PLAT_M5STACK
+void IRAM_ATTR isrRF24(void)
+#else
+void isrRF24(void)
+#endif
+{
+  //Serial.println("INT");
+  radioInt = true;
 }
 
 int handleMessage(RF24NetworkHeader* hdr, cloudMsg* msg)
@@ -507,13 +609,14 @@ int handleMessage(RF24NetworkHeader* hdr, cloudMsg* msg)
   int ret = 1; //success or failure.
   bool localMsg = false; //did the message originate from the console or a network node?
   bool suppressResponse = false; //need to guard against response loops.
+  CRGB color;
+  bool nodeFound = false;
 
   if(hdr->from_node == eeprom.netNodeAddress) localMsg = true; //print response to local console, not source network node.
 
   switch(msg->msgType)
   {
     case MSG_SETCOLOR:
-    CRGB color;
     //memcpy(msg->msgPayload, &color, sizeof(CRGB));
     staticColor.r = msg->msgPayload[0];
     staticColor.g = msg->msgPayload[1];
@@ -551,7 +654,7 @@ int handleMessage(RF24NetworkHeader* hdr, cloudMsg* msg)
     case MSG_RESP:
     ret = 0;
     suppressResponse = true;
-    bool nodeFound = false;
+    nodeFound = false;
 
     //scan for presence of responding node in nodesPresent[] list.
     for(uint8_t i = 0; i < NODEADDRESSINDEX_MAX; i++)
@@ -856,29 +959,221 @@ void fillnoise8() {
 
 void handleButtons(void)
 {
-  /*
+#ifdef PLAT_M5STACK
+/*
+  M5.update(); //Read the press state of the key.  读取按键 A, B, C 的状态
+  if (M5.BtnA.wasReleased() || M5.BtnA.pressedFor(1000, 200)) {
+    M5.Lcd.print('A');
+  } else if (M5.BtnB.wasReleased() || M5.BtnB.pressedFor(1000, 200)) {
+    M5.Lcd.print('B');
+  } else if (M5.BtnC.wasReleased() || M5.BtnC.pressedFor(1000, 200)) {
+    M5.Lcd.print('C');
+  } else if (M5.BtnB.wasReleasefor(700)) {
+    M5.Lcd.clear(WHITE);  // Clear the screen and set white to the background color.  清空屏幕并将白色设置为底色
+    M5.Lcd.setCursor(0, 0);
+  }
+  */
+
   buttonPwr.update();
   if(buttonPwr.state() == LOW && !buttonPwrIsPressed)
   {
     //TODO: something
+    Serial.println("buttonPwrIsPressed");
+
+    pwrToggle ^= 1; //toggle power, actually just switch between off and the last color used.
+
+    uint32_t c;
+    if(pwrToggle) c = gColor;
+    else c = 0;
+
+    for(unsigned char i = 1; i<4; i++)
+    {
+      cmdSetColor(i, c);
+    }
 
     buttonPwrIsPressed = true;
+  }
+  else if(buttonPwr.state() == HIGH && buttonPwrIsPressed)
+  {
+    buttonPwrIsPressed = false;
   }
 
   buttonPat.update();
   if(buttonPat.state() == LOW && !buttonPatIsPressed)
   {
     //TODO: something
+    Serial.println("buttonPatIsPressed");
+    
+    patStep++;
+    if(patStep > PATSTEP_CYN) patStep = PATSTEP_RED;
+
+    switch(patStep)
+    {
+      case PATSTEP_RED:
+        gColor = 0xFF0000;
+        break;
+
+      case PATSTEP_GRN:
+        gColor = 0x00FF00;
+        break;
+
+      case PATSTEP_BLU:
+        gColor = 0x0000FF;
+        break;
+
+      case PATSTEP_PUR:
+        gColor = 0xFF00FF;
+        break;
+
+      case PATSTEP_YEL:
+        gColor = 0xFFFF00;
+        break;
+
+      case PATSTEP_CYN:
+        gColor = 0x00FFFF;
+        break;
+
+      case PATSTEP_OFF:
+      default:
+        gColor = 0;
+        break;
+    }
+
+    //TODO: change pattern.
+    for(unsigned char i = 1; i<4; i++)
+    {
+      cmdSetColor(i, gColor);
+    }
 
     buttonPatIsPressed = true;
+  }
+  else if(buttonPat.state() == HIGH && buttonPatIsPressed)
+  {
+    buttonPatIsPressed = false;
   }
 
   buttonBrt.update();
   if(buttonBrt.state() == LOW && !buttonBrtIsPressed)
   {
     //TODO: something
+    Serial.println("buttonBrtIsPressed");
+
+    eeprom.ledBrightness += 0x1F; //8 steps out of 256 values.
+    for(unsigned char i = 1; i<4; i++)
+    {
+      cmdSetBrightness(i, eeprom.ledBrightness);
+    }
 
     buttonBrtIsPressed = true;
   }
-  */
+  else if(buttonBrt.state() == HIGH && buttonBrtIsPressed)
+  {
+    buttonBrtIsPressed = false;
+  }
+#else
+#endif
+
+}
+
+bool cmdSetColor(unsigned char addrDst, uint32_t colorVal)
+{
+  CRGB color;
+  color.r = (colorVal >> 16) & 0xFF;
+  color.g = (colorVal >> 8) & 0xFF;
+  color.b = (colorVal & 0xFF);
+
+  Serial.print("Set node ");
+  Serial.print(addrDst);
+  Serial.print(" (");
+  Serial.print(nodeAddress[addrDst], OCT);
+  Serial.print(") to #");
+  Serial.print(colorVal, HEX);
+  Serial.print(": ");
+
+  RF24NetworkHeader header(nodeAddress[addrDst]);
+  header.from_node = eeprom.netNodeAddress;
+  cloudMsg msg;
+  msg.msgType = MSG_SETCOLOR;
+  //memcpy(msg.msgPayload, &color, sizeof(CRGB)); //not working.
+  msg.msgPayload[0] = color.r;
+  msg.msgPayload[1] = color.g;
+  msg.msgPayload[2] = color.b;
+  bool ok = false;
+
+  if(nodeAddress[addrDst] == eeprom.netNodeAddress)
+  {
+    handleMessage(&header, &msg);
+    ok = true;
+  }
+  else
+  {
+    if(networkOk && network.is_valid_address(nodeAddress[addrDst]) 
+      && network.write(header, &msg, sizeof(msg)))
+      {
+        ok = true;
+      }
+  }
+
+  return ok;
+}
+
+bool cmdSetBrightness(unsigned char addrDst, unsigned char brightnessVal)
+{
+  RF24NetworkHeader header(nodeAddress[addrDst]);
+  header.from_node = eeprom.netNodeAddress;
+  cloudMsg msg;
+  msg.msgType = MSG_SETBRIGHT;
+  msg.msgPayload[0] = brightnessVal;
+  bool ok = false;
+
+  Serial.print("Brightness -> ");
+  Serial.print(brightnessVal);
+  Serial.print(": ");
+
+  if(nodeAddress[addrDst] == eeprom.netNodeAddress)
+  {
+    handleMessage(&header, &msg);
+    ok = true;
+  }
+  else
+  {
+    if(networkOk && network.is_valid_address(nodeAddress[addrDst]) 
+      && network.write(header, &msg, sizeof(msg)))
+      {
+        ok = true;
+      }
+  }
+
+  if(ok)
+  {
+    Serial.print("OK.\n");
+  }
+  else
+  {
+    Serial.print("FAIL.\n");
+  }
+
+  return ok;
+}
+
+int device_prepDeepSleep(void)
+{
+  Serial.println("Entering deep sleep...");
+
+  radio.powerDown(); //shut down NRF24L01 radio.
+
+  Serial.println("Sleeping.");
+  Serial.flush();
+
+  esp_sleep_enable_ext0_wakeup(DEEPSLEEP_GPIO_PINMASK, LOW);
+  //NOTE: we only want to exit deep sleep when we see human activity again via 
+  //the PIR sensor and not the wakeup timer.
+  if(1) esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_TIMER);
+  else esp_sleep_enable_timer_wakeup(TIME_TO_SLEEP_DEEP);
+
+  esp_deep_sleep_start();
+
+  radio.powerUp(); //start up NRF24L01 radio.
+
+  return 0;
 }
